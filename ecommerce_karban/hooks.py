@@ -7,6 +7,10 @@ app_license = "mit"
 
 # Apps
 # ------------------
+import ecommerce_integrations.unicommerce.customer as unicom_customer
+from ecommerce_karban.utils import sync_customer_custom
+
+unicom_customer.sync_customer = sync_customer_custom
 
 # required_apps = []
 
