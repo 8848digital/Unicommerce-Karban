@@ -16,6 +16,10 @@ def sync_customer_custom(order):
 	"""Using order create a new customer.
 
 	Note: Unicommerce doesn't deduplicate customer."""
+	frappe.log_error(
+		_("Syncing customer from Unicommerce order {0}").format(order.get("customerGSTIN")),
+		_("Unicommerce Customer Sync")
+	)
 	customer = _create_new_customer(order)
 	_create_customer_addresses(order.get("addresses") or [], customer, order.get("customerGSTIN"))
 	return customer
