@@ -11,15 +11,23 @@ from typing import Any
 from frappe import _
 import json
 from frappe.utils.nestedset import get_root_of
+from typing import Any, NewType
 
-def sync_customer_custom(order):
+from ecommerce_integrations.controllers.scheduling import need_to_run
+from ecommerce_integrations.unicommerce.api_client import UnicommerceAPIClient
+from ecommerce_integrations.unicommerce.constants import (
+	ORDER_CODE_FIELD,
+	SETTINGS_DOCTYPE,
+)
+from ecommerce_integrations.unicommerce.order import _get_new_orders, _create_sales_invoices, _sync_order_items,_create_order
+from ecommerce_integrations.unicommerce.utils import create_unicommerce_log
+
+
+UnicommerceOrder = NewType("UnicommerceOrder", dict[str, Any])
+def sync_customer(order):
 	"""Using order create a new customer.
 
 	Note: Unicommerce doesn't deduplicate customer."""
-	frappe.log_error(
-		_("Syncing customer from Unicommerce order {0}").format(order.get("customerGSTIN")),
-		_("Unicommerce Customer Sync")
-	)
 	customer = _create_new_customer(order)
 	_create_customer_addresses(order.get("addresses") or [], customer, order.get("customerGSTIN"))
 	return customer
@@ -112,3 +120,82 @@ def _create_customer_address(uni_address, address_type, customer, gstin, also_sh
 			"gst_category": "Registered Regular" if gstin != "null" else "Unregistered",
 		}
 	).insert(ignore_mandatory=True)
+
+
+SYNC_METHODS = {
+	"Items": "ecommerce_integrations.unicommerce.product.upload_new_items",
+	"Orders": "ecommerce_karban.utils.sync_new_orders",
+	"Inventory": "ecommerce_integrations.unicommerce.inventory.update_inventory_on_unicommerce",
+}
+
+
+@frappe.whitelist()
+def force_sync(document) -> None:
+	frappe.only_for("System Manager")
+
+	method = SYNC_METHODS.get(document)
+	if not method:
+		frappe.throw(frappe._("Unknown method"))
+	frappe.enqueue(method, queue="long", is_async=True, **{"force": True})
+
+
+def sync_new_orders(client: UnicommerceAPIClient = None, force=False):
+	"""This is called from a scheduled job and syncs all new orders from last synced time."""
+	settings = frappe.get_cached_doc(SETTINGS_DOCTYPE)
+
+	if not settings.is_enabled():
+		return
+
+	# check if need to run based on configured sync frequency.
+	# Note: This also updates last_order_sync if function runs.
+	if not force and not need_to_run(SETTINGS_DOCTYPE, "order_sync_frequency", "last_order_sync"):
+		return
+
+	if client is None:
+		client = UnicommerceAPIClient()
+
+	status = "COMPLETE" if settings.only_sync_completed_orders else None
+
+	new_orders = _get_new_orders(client, status=status)
+
+	if new_orders is None:
+		return
+
+	for order in new_orders:
+		sales_order = create_order(order, client=client)
+
+		if settings.only_sync_completed_orders:
+			_create_sales_invoices(order, sales_order, client)
+
+
+def create_order(payload: UnicommerceOrder, request_id: str | None = None, client=None) -> None:
+	order = payload
+
+	existing_so = frappe.db.get_value("Sales Order", {ORDER_CODE_FIELD: order["code"]})
+	if existing_so:
+		so = frappe.get_doc("Sales Order", existing_so)
+		return so
+
+	# If a sales order already exists, then every time it's executed
+	if request_id is None:
+		log = create_unicommerce_log(
+			method="ecommerce_integrations.unicommerce.order.create_order", request_data=payload
+		)
+		request_id = log.name
+
+	if client is None:
+		client = UnicommerceAPIClient()
+
+	frappe.set_user("Administrator")
+	frappe.flags.request_id = request_id
+	try:
+		_sync_order_items(order, client=client)
+		customer = sync_customer(order)
+		order = _create_order(order, customer)
+	except Exception as e:
+		create_unicommerce_log(status="Error", exception=e, rollback=True)
+		frappe.flags.request_id = None
+	else:
+		create_unicommerce_log(status="Success")
+		frappe.flags.request_id = None
+		return order

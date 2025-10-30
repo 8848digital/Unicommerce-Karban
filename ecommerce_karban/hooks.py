@@ -7,11 +7,6 @@ app_license = "mit"
 
 # Apps
 # ------------------
-import ecommerce_integrations.unicommerce.customer as unicom_customer
-from ecommerce_karban.utils import sync_customer_custom
-
-unicom_customer.sync_customer = sync_customer_custom
-
 # required_apps = []
 
 # Each item in the list will be shown as an app in the apps page
@@ -178,9 +173,9 @@ unicom_customer.sync_customer = sync_customer_custom
 # Overriding Methods
 # ------------------------------
 #
-# override_whitelisted_methods = {
-# 	"frappe.desk.doctype.event.event.get_events": "ecommerce_karban.event.get_events"
-# }
+override_whitelisted_methods = {
+	"ecommerce_integrations.unicommerce.utils.force_sync": "ecommerce_karban.utils.force_sync"
+}
 #
 # each overriding function accepts a `data` argument;
 # generated from the base implementation of the doctype dashboard,
@@ -245,4 +240,3 @@ unicom_customer.sync_customer = sync_customer_custom
 # default_log_clearing_doctypes = {
 # 	"Logging DocType Name": 30  # days to retain logs
 # }
-
