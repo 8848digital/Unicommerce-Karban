@@ -278,6 +278,18 @@ def get_taxes_so(line_items, channel_config) -> list:
 			integration=MODULE_NAME, integration_item_code=item["itemSku"]
 		)
 		item_total = flt(item.get("sellingPrice", 0.0))
+		if not item_total:
+			item_price = frappe.get_all(
+				"Item Price",
+				filters={
+					"item_code": item_code,
+					"price_list": "Standard Selling"
+				},
+				fields=["price_list_rate", "uom", "valid_from"],
+				order_by="valid_from desc, modified desc",
+				limit=1
+			)
+			item_total = item_price[0].price_list_rate if item_price else 0.0
 		for tax_head, unicommerce_field in TAX_FIELDS_MAPPING.items():
 			tax_amount = 0.0
 			tax_rate_field = TAX_RATE_FIELDS_MAPPING.get(tax_head, "")
