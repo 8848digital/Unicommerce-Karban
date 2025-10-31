@@ -6,6 +6,20 @@ from ecommerce_integrations.unicommerce.constants import (
 	SETTINGS_DOCTYPE,
 	UNICOMMERCE_COUNTRY_MAPPING,
 	UNICOMMERCE_INDIAN_STATES_MAPPING,
+	CHANNEL_ID_FIELD,
+	CHANNEL_TAX_ACCOUNT_FIELD_MAP,
+	FACILITY_CODE_FIELD,
+	INVOICE_CODE_FIELD,
+	IS_COD_CHECKBOX,
+	MODULE_NAME,
+	ORDER_CODE_FIELD,
+	ORDER_ITEM_BATCH_NO,
+	ORDER_ITEM_CODE_FIELD,
+	ORDER_STATUS_FIELD,
+	PACKAGE_TYPE_FIELD,
+	SETTINGS_DOCTYPE,
+	TAX_FIELDS_MAPPING,
+	TAX_RATE_FIELDS_MAPPING,
 )
 from typing import Any
 from frappe import _
@@ -19,8 +33,11 @@ from ecommerce_integrations.unicommerce.constants import (
 	ORDER_CODE_FIELD,
 	SETTINGS_DOCTYPE,
 )
-from ecommerce_integrations.unicommerce.order import _get_new_orders, _create_sales_invoices, _sync_order_items,_create_order
-from ecommerce_integrations.unicommerce.utils import create_unicommerce_log
+from ecommerce_integrations.unicommerce.order import _get_new_orders, _create_sales_invoices, _sync_order_items,_get_line_items,_get_facility_code
+from ecommerce_integrations.unicommerce.utils import create_unicommerce_log, get_unicommerce_date
+from frappe.utils import add_to_date, flt
+from ecommerce_integrations.ecommerce_integrations.doctype.ecommerce_item import ecommerce_item
+from ecommerce_integrations.utils.taxation import get_dummy_tax_category
 
 
 UnicommerceOrder = NewType("UnicommerceOrder", dict[str, Any])
@@ -199,3 +216,94 @@ def create_order(payload: UnicommerceOrder, request_id: str | None = None, clien
 		create_unicommerce_log(status="Success")
 		frappe.flags.request_id = None
 		return order
+
+def _create_order(order: UnicommerceOrder, customer) -> None:
+	channel_config = frappe.get_doc("Unicommerce Channel", order["channel"])
+	settings = frappe.get_cached_doc(SETTINGS_DOCTYPE)
+
+	is_cancelled = order["status"] == "CANCELLED"
+
+	facility_code = _get_facility_code(order["saleOrderItems"])
+	company_address, dispatch_address = settings.get_company_addresses(facility_code)
+
+	so = frappe.get_doc(
+		{
+			"doctype": "Sales Order",
+			"customer": customer.name,
+			"naming_series": channel_config.sales_order_series or settings.sales_order_series,
+			ORDER_CODE_FIELD: order["code"],
+			ORDER_STATUS_FIELD: order["status"],
+			CHANNEL_ID_FIELD: order["channel"],
+			FACILITY_CODE_FIELD: facility_code,
+			IS_COD_CHECKBOX: bool(order["cod"]),
+			"transaction_date": get_unicommerce_date(order["displayOrderDateTime"]),
+			"delivery_date": get_unicommerce_date(order["fulfillmentTat"]),
+			"ignore_pricing_rule": 1,
+			"items": _get_line_items(
+				order["saleOrderItems"], default_warehouse=channel_config.warehouse, is_cancelled=is_cancelled
+			),
+			"company": channel_config.company,
+			"taxes": get_taxes_so(order["saleOrderItems"], channel_config),
+			"tax_category": get_dummy_tax_category(),
+			"company_address": company_address,
+			"dispatch_address_name": dispatch_address,
+			"currency": order.get("currencyCode"),
+		}
+	)
+
+	so.flags.raw_data = order
+	so.save()
+	so.submit()
+
+	if is_cancelled:
+		so.cancel()
+
+	return so
+
+
+def get_taxes_so(line_items, channel_config) -> list:
+	taxes = []
+
+	tax_map = {tax_head: 0.0 for tax_head in TAX_FIELDS_MAPPING.keys()}
+	item_wise_tax_map = {tax_head: {} for tax_head in TAX_FIELDS_MAPPING.keys()}
+
+	tax_account_map = {
+		tax_head: channel_config.get(account_field)
+		for tax_head, account_field in CHANNEL_TAX_ACCOUNT_FIELD_MAP.items()
+	}
+
+
+	for item in line_items:
+		item_code = ecommerce_item.get_erpnext_item_code(
+			integration=MODULE_NAME, integration_item_code=item["itemSku"]
+		)
+		item_total = flt(item.get("sellingPrice", 0.0))
+		for tax_head, unicommerce_field in TAX_FIELDS_MAPPING.items():
+			tax_amount = 0.0
+			tax_rate_field = TAX_RATE_FIELDS_MAPPING.get(tax_head, "")
+			tax_rate = item.get(tax_rate_field, 0.0)
+			if tax_rate:
+				tax_amount = flt(item_total * (tax_rate / 100.0), 2)
+			else:
+				tax_amount = 0.0
+			tax_map[tax_head] += tax_amount
+
+			item_wise_tax_map[tax_head][item_code] = [tax_rate, tax_amount]
+
+	taxes = []
+
+	for tax_head, value in tax_map.items():
+		if not value:
+			continue
+		taxes.append(
+			{
+				"charge_type": "Actual",
+				"account_head": tax_account_map[tax_head],
+				"tax_amount": value,
+				"description": tax_head.replace("_", " ").upper(),
+				"item_wise_tax_detail": json.dumps(item_wise_tax_map[tax_head]),
+				"dont_recompute_tax": 1,
+			}
+		)
+
+	return taxes
