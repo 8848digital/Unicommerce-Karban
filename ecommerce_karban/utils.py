@@ -262,60 +262,28 @@ def _create_order(order: UnicommerceOrder, customer) -> None:
 
 
 def get_taxes_so(line_items, channel_config) -> list:
-	taxes = []
+    taxes = []
 
-	tax_map = {tax_head: 0.0 for tax_head in TAX_FIELDS_MAPPING.keys()}
-	item_wise_tax_map = {tax_head: {} for tax_head in TAX_FIELDS_MAPPING.keys()}
+    tax_account_map = {
+        tax_head: channel_config.get(account_field)
+        for tax_head, account_field in CHANNEL_TAX_ACCOUNT_FIELD_MAP.items()
+    }
 
-	tax_account_map = {
-		tax_head: channel_config.get(account_field)
-		for tax_head, account_field in CHANNEL_TAX_ACCOUNT_FIELD_MAP.items()
-	}
+    tax_rows = []
 
+    for tax_head, unicommerce_field in TAX_FIELDS_MAPPING.items():
+        has_tax = any(item.get(TAX_RATE_FIELDS_MAPPING.get(tax_head, ""), 0) for item in line_items)
+        if not has_tax:
+            continue
 
-	for item in line_items:
-		item_code = ecommerce_item.get_erpnext_item_code(
-			integration=MODULE_NAME, integration_item_code=item["itemSku"]
-		)
-		item_total = flt(item.get("sellingPrice", 0.0))
-		if not item_total:
-			item_price = frappe.get_all(
-				"Item Price",
-				filters={
-					"item_code": item_code,
-					"price_list": "Standard Selling"
-				},
-				fields=["price_list_rate", "uom", "valid_from"],
-				order_by="valid_from desc, modified desc",
-				limit=1
-			)
-			item_total = item_price[0].price_list_rate if item_price else 0.0
-		for tax_head, unicommerce_field in TAX_FIELDS_MAPPING.items():
-			tax_amount = 0.0
-			tax_rate_field = TAX_RATE_FIELDS_MAPPING.get(tax_head, "")
-			tax_rate = item.get(tax_rate_field, 0.0)
-			if tax_rate:
-				tax_amount = flt(item_total * (tax_rate / 100.0), 2)
-			else:
-				tax_amount = 0.0
-			tax_map[tax_head] += tax_amount
+        tax_rate = flt(line_items[0].get(TAX_RATE_FIELDS_MAPPING.get(tax_head, ""), 0))
 
-			item_wise_tax_map[tax_head][item_code] = [tax_rate, tax_amount]
+        tax_rows.append({
+            "charge_type": "On Net Total",
+            "account_head": tax_account_map[tax_head],
+            "rate": tax_rate,
+            "description": tax_head.replace("_", " ").upper(),
+            "dont_recompute_tax": 1,
+        })
 
-	taxes = []
-
-	for tax_head, value in tax_map.items():
-		if not value:
-			continue
-		taxes.append(
-			{
-				"charge_type": "Actual",
-				"account_head": tax_account_map[tax_head],
-				"tax_amount": value,
-				"description": tax_head.replace("_", " ").upper(),
-				"item_wise_tax_detail": json.dumps(item_wise_tax_map[tax_head]),
-				"dont_recompute_tax": 1,
-			}
-		)
-
-	return taxes
+    return tax_rows
