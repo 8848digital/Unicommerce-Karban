@@ -306,7 +306,7 @@ def _create_order(order: UnicommerceOrder, customer) -> None:
 
 	so.flags.raw_data = order
 	so.save()
-	so.submit()
+	# so.submit()
 
 	facility_code = so.get(FACILITY_CODE_FIELD)
 	shipping_packages = order["shippingPackages"]
@@ -319,7 +319,7 @@ def _create_order(order: UnicommerceOrder, customer) -> None:
 		uni_line_items = invoice_tax["invoiceItems"]
 		so.set("taxes", get_taxes(uni_line_items, channel_config))
 
-	# so.submit()
+	so.submit()
 	if is_cancelled:
 		so.cancel()
 
