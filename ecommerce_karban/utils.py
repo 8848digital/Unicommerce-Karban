@@ -1,5 +1,4 @@
 import frappe
-from ecommerce_integrations.unicommerce.customer import _check_if_customer_exists
 from ecommerce_integrations.unicommerce.constants import (
 	ADDRESS_JSON_FIELD,
 	CUSTOMER_CODE_FIELD,
@@ -25,7 +24,7 @@ from ecommerce_integrations.unicommerce.constants import (
 	ORDER_CODE_FIELD,
 	SETTINGS_DOCTYPE,
 )
-from ecommerce_integrations.unicommerce.order import _get_new_orders, _create_sales_invoices, _sync_order_items,_get_line_items,_get_facility_code,get_taxes
+from ecommerce_integrations.unicommerce.order import _get_new_orders, _create_sales_invoices, _sync_order_items,_get_line_items,_get_facility_code,get_taxes,_get_batch_no
 from ecommerce_integrations.unicommerce.utils import create_unicommerce_log, get_unicommerce_date
 from ecommerce_integrations.utils.taxation import get_dummy_tax_category
 
@@ -38,6 +37,23 @@ def sync_customer(order):
 	customer = _create_new_customer(order)
 	_create_customer_addresses(order.get("addresses") or [], customer, order.get("customerGSTIN"))
 	return customer
+
+def _check_if_customer_exists(address, customer_code):
+	"""Very crude method to determine if same customer exists.
+
+	If ALL address fields match then new customer is not created"""
+
+	customer_name = None
+
+	# if customer_code:
+	# 	customer_name = frappe.db.get_value("Customer", {CUSTOMER_CODE_FIELD: customer_code})
+
+	if not customer_name:
+		customer_name = frappe.db.get_value("Customer", {'customer_name': address.get("name")})
+
+	if customer_name:
+		return frappe.get_doc("Customer", customer_name)
+
 
 def _create_new_customer(order):
 	"""Create a new customer from Sales Order address data"""
@@ -108,28 +124,64 @@ def _create_customer_address(uni_address, address_type, customer, gstin, also_sh
 	state = uni_address.get("state")
 	if country_code == "IN" and state in UNICOMMERCE_INDIAN_STATES_MAPPING:
 		state = UNICOMMERCE_INDIAN_STATES_MAPPING.get(state)
+		
+	address_line1 = uni_address.get("addressLine1") or "Not provided"
+	address_line2 = uni_address.get("addressLine2")
+	city = uni_address.get("city")
+	state = state
+	country = country
+	pincode = uni_address.get("pincode")
+	email = uni_address.get("email")
+	phone = uni_address.get("phone")
+	address_type = address_type,
 
-	frappe.get_doc(
-		{
-			"address_line1": uni_address.get("addressLine1") or "Not provided",
-			"address_line2": uni_address.get("addressLine2"),
-			"address_type": address_type,
-			"city": uni_address.get("city"),
-			"country": country,
-			"county": uni_address.get("district"),
-			"doctype": "Address",
-			"email_id": uni_address.get("email"),
-			"phone": uni_address.get("phone"),
-			"pincode": uni_address.get("pincode"),
-			"state": state,
-			"links": [{"link_doctype": "Customer", "link_name": customer.name}],
-			"is_primary_address": int(address_type == "Billing"),
-			"is_shipping_address": int(also_shipping or address_type == "Shipping"),
-			"gstin": gstin if gstin != "null" else "",
-			"gst_category": "Registered Regular" if gstin != "null" else "Unregistered",
-		}
-	).insert(ignore_mandatory=True)
+	filters = {
+		"address_type": address_type,
+		"address_line1": address_line1,
+		"address_line2": address_line2,
+		"city": city,
+		"state": state,
+		"country": country,
+		"pincode": pincode,
+		"email_id": email,
+		"phone": phone,
+		"gstin": gstin if gstin != "null" else "",
+	}
 
+	filters = {k: (v[0] if isinstance(v, tuple) else v) for k, v in filters.items() if v}
+
+
+	existing_address_name = frappe.db.get_all("Address",filters=filters,fields=["name"],order_by="creation desc",limit=1)
+
+	if existing_address_name:
+		existing_address = frappe.get_doc("Address", existing_address_name[0].name)
+
+		if not any(l.link_doctype == "Customer" and l.link_name == customer.name for l in existing_address.links):
+			existing_address.append("links", {"link_doctype": "Customer", "link_name": customer.name})
+			existing_address.save(ignore_permissions=True)
+
+		return existing_address.name
+
+	new_address = frappe.get_doc({
+		"doctype": "Address",
+		"address_type": address_type,
+		"address_line1": address_line1,
+		"address_line2": address_line2,
+		"city": city,
+		"state": state,
+		"country": country,
+		"pincode": pincode,
+		"email_id": email,
+		"phone": phone,
+		"is_primary_address": int(address_type == "Billing"),
+		"is_shipping_address": int(also_shipping or address_type == "Shipping"),
+		"links": [{"link_doctype": "Customer", "link_name": customer.name}],
+		"gstin": gstin if gstin != "null" else "",
+		"gst_category": "Registered Regular" if gstin != "null" else "Unregistered",
+	})
+
+	new_address.insert(ignore_permissions=True)
+	return new_address.name
 
 SYNC_METHODS = {
 	"Items": "ecommerce_integrations.unicommerce.product.upload_new_items",
@@ -245,7 +297,7 @@ def _create_order(order: UnicommerceOrder, customer) -> None:
 
 	so.flags.raw_data = order
 	so.save()
-	# so.submit()
+	so.submit()
 
 	facility_code = so.get(FACILITY_CODE_FIELD)
 	shipping_packages = order["shippingPackages"]
@@ -258,8 +310,44 @@ def _create_order(order: UnicommerceOrder, customer) -> None:
 		uni_line_items = invoice_tax["invoiceItems"]
 		so.set("taxes", get_taxes(uni_line_items, channel_config))
 
-	so.submit()
+	# so.submit()
 	if is_cancelled:
 		so.cancel()
 
 	return so
+
+from ecommerce_integrations.ecommerce_integrations.doctype.ecommerce_item import ecommerce_item
+from ecommerce_integrations.unicommerce.constants import (
+	MODULE_NAME,
+	ORDER_ITEM_BATCH_NO,
+	ORDER_ITEM_CODE_FIELD
+)
+
+def _get_line_items(
+	line_items, default_warehouse: str | None = None, is_cancelled: bool = False
+) -> list[dict[str, Any]]:
+	settings = frappe.get_cached_doc(SETTINGS_DOCTYPE)
+	wh_map = settings.get_integration_to_erpnext_wh_mapping(all_wh=True)
+	so_items = []
+
+	for item in line_items:
+		if not is_cancelled and item.get("statusCode") == "CANCELLED":
+			continue
+
+		item_code = ecommerce_item.get_erpnext_item_code(
+			integration=MODULE_NAME, integration_item_code=item["itemSku"]
+		)
+		warehouse = wh_map.get(item["facilityCode"]) or default_warehouse
+		so_items.append(
+			{
+				"item_code": item_code,
+				"rate": item["sellingPriceWithoutTaxesAndDiscount"],
+				"qty": 1,
+				"stock_uom": "Nos",
+				"warehouse": warehouse,
+				ORDER_ITEM_CODE_FIELD: item.get("code"),
+				ORDER_ITEM_BATCH_NO: _get_batch_no(item),
+			}
+		)
+	return so_items
+
