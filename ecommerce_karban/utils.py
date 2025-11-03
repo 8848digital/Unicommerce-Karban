@@ -7,19 +7,11 @@ from ecommerce_integrations.unicommerce.constants import (
 	UNICOMMERCE_COUNTRY_MAPPING,
 	UNICOMMERCE_INDIAN_STATES_MAPPING,
 	CHANNEL_ID_FIELD,
-	CHANNEL_TAX_ACCOUNT_FIELD_MAP,
 	FACILITY_CODE_FIELD,
-	INVOICE_CODE_FIELD,
 	IS_COD_CHECKBOX,
-	MODULE_NAME,
 	ORDER_CODE_FIELD,
-	ORDER_ITEM_BATCH_NO,
-	ORDER_ITEM_CODE_FIELD,
 	ORDER_STATUS_FIELD,
-	PACKAGE_TYPE_FIELD,
 	SETTINGS_DOCTYPE,
-	TAX_FIELDS_MAPPING,
-	TAX_RATE_FIELDS_MAPPING,
 )
 from typing import Any
 from frappe import _
@@ -33,10 +25,8 @@ from ecommerce_integrations.unicommerce.constants import (
 	ORDER_CODE_FIELD,
 	SETTINGS_DOCTYPE,
 )
-from ecommerce_integrations.unicommerce.order import _get_new_orders, _create_sales_invoices, _sync_order_items,_get_line_items,_get_facility_code
+from ecommerce_integrations.unicommerce.order import _get_new_orders, _create_sales_invoices, _sync_order_items,_get_line_items,_get_facility_code,get_taxes
 from ecommerce_integrations.unicommerce.utils import create_unicommerce_log, get_unicommerce_date
-from frappe.utils import add_to_date, flt
-from ecommerce_integrations.ecommerce_integrations.doctype.ecommerce_item import ecommerce_item
 from ecommerce_integrations.utils.taxation import get_dummy_tax_category
 
 
@@ -50,49 +40,51 @@ def sync_customer(order):
 	return customer
 
 def _create_new_customer(order):
-    """Create a new customer from Sales Order address data"""
+	"""Create a new customer from Sales Order address data"""
 
-    address = order.get("billingAddress") or (order.get("addresses") and order.get("addresses")[0])
-    address.pop("id", None)  # this is not important and can be different for same address
-    customer_code = order.get("customerCode")
+	address = order.get("billingAddress") or (order.get("addresses") and order.get("addresses")[0])
+	address.pop("id", None)  # this is not important and can be different for same address
+	customer_code = order.get("customerCode")
 
-    customer = _check_if_customer_exists(address, customer_code)
-    if customer:
-        if order.get("customerGSTIN") != "null":
-            frappe.db.set_value("Customer", customer.name, "gstin", order.get("customerGSTIN"))
-            frappe.db.set_value("Customer", customer.name, "gst_category", "Registered Regular")
-        else:
-            frappe.db.set_value("Customer", customer.name, "gstin", "")
-            frappe.db.set_value("Customer", customer.name, "gst_category", "Unregistered")
-        return customer
+	customer = _check_if_customer_exists(address, customer_code)
+	if customer:
+		if order.get("customerGSTIN") != "null":
+			frappe.db.set_value("Customer", customer.name, "gstin", order.get("customerGSTIN"))
+			frappe.db.set_value("Customer", customer.name, "gst_category", "Registered Regular")
+		else:
+			frappe.db.set_value("Customer", customer.name, "gstin", "")
+			frappe.db.set_value("Customer", customer.name, "gst_category", "Unregistered")
+		frappe.db.set_value("Customer", customer.name, "default_currency", order.get("currencyCode"))
+		return customer
 
-    setting = frappe.get_cached_doc(SETTINGS_DOCTYPE)
-    customer_group = (
-        frappe.db.get_value(
-            "Unicommerce Channel", {"channel_id": order["channel"]}, fieldname="customer_group"
-        )
-        or setting.default_customer_group
-    )
+	setting = frappe.get_cached_doc(SETTINGS_DOCTYPE)
+	customer_group = (
+		frappe.db.get_value(
+			"Unicommerce Channel", {"channel_id": order["channel"]}, fieldname="customer_group"
+		)
+		or setting.default_customer_group
+	)
 
-    name = address.get("name") or order["channel"] + " customer"
-    customer = frappe.get_doc(
-        {
-            "doctype": "Customer",
-            "customer_name": name,
-            "customer_group": customer_group,
-            "territory": get_root_of("Territory"),
-            "customer_type": "Individual",
-            "gstin": order.get("customerGSTIN") if order.get("customerGSTIN") != "null" else "",
-            "gst_category": "Registered Regular" if order.get("customerGSTIN") != "null" else "Unregistered",
-            ADDRESS_JSON_FIELD: json.dumps(address),
-            CUSTOMER_CODE_FIELD: customer_code,
-        }
-    )
+	name = address.get("name") or order["channel"] + " customer"
+	customer = frappe.get_doc(
+		{
+			"doctype": "Customer",
+			"customer_name": name,
+			"customer_group": customer_group,
+			"territory": get_root_of("Territory"),
+			"customer_type": "Individual",
+			"gstin": order.get("customerGSTIN") if order.get("customerGSTIN") != "null" else "",
+			"gst_category": "Registered Regular" if order.get("customerGSTIN") != "null" else "Unregistered",
+			"default_currency": order.get("currencyCode"),
+			ADDRESS_JSON_FIELD: json.dumps(address),
+			CUSTOMER_CODE_FIELD: customer_code,
+		}
+	)
 
-    customer.flags.ignore_mandatory = True
-    customer.insert(ignore_permissions=True)
+	customer.flags.ignore_mandatory = True
+	customer.insert(ignore_permissions=True)
 
-    return customer
+	return customer
 
 
 def _create_customer_addresses(addresses: list[dict[str, Any]], customer, gstin) -> None:
@@ -243,7 +235,7 @@ def _create_order(order: UnicommerceOrder, customer) -> None:
 				order["saleOrderItems"], default_warehouse=channel_config.warehouse, is_cancelled=is_cancelled
 			),
 			"company": channel_config.company,
-			"taxes": get_taxes_so(order["saleOrderItems"], channel_config),
+			"taxes": get_taxes(order["saleOrderItems"], channel_config),
 			"tax_category": get_dummy_tax_category(),
 			"company_address": company_address,
 			"dispatch_address_name": dispatch_address,
@@ -253,37 +245,21 @@ def _create_order(order: UnicommerceOrder, customer) -> None:
 
 	so.flags.raw_data = order
 	so.save()
-	so.submit()
+	# so.submit()
 
+	facility_code = so.get(FACILITY_CODE_FIELD)
+	shipping_packages = order["shippingPackages"]
+	client = UnicommerceAPIClient()
+	for package in shipping_packages:
+		invoice_data = client.get_sales_invoice(
+				shipping_package_code=package["code"], facility_code=facility_code
+			)
+		invoice_tax = invoice_data["invoice"]
+		uni_line_items = invoice_tax["invoiceItems"]
+		so.set("taxes", get_taxes(uni_line_items, channel_config))
+
+	so.submit()
 	if is_cancelled:
 		so.cancel()
 
 	return so
-
-
-def get_taxes_so(line_items, channel_config) -> list:
-    taxes = []
-
-    tax_account_map = {
-        tax_head: channel_config.get(account_field)
-        for tax_head, account_field in CHANNEL_TAX_ACCOUNT_FIELD_MAP.items()
-    }
-
-    tax_rows = []
-
-    for tax_head, unicommerce_field in TAX_FIELDS_MAPPING.items():
-        has_tax = any(item.get(TAX_RATE_FIELDS_MAPPING.get(tax_head, ""), 0) for item in line_items)
-        if not has_tax:
-            continue
-
-        tax_rate = flt(line_items[0].get(TAX_RATE_FIELDS_MAPPING.get(tax_head, ""), 0))
-
-        tax_rows.append({
-            "charge_type": "On Net Total",
-            "account_head": tax_account_map[tax_head],
-            "rate": tax_rate,
-            "description": tax_head.replace("_", " ").upper(),
-            "dont_recompute_tax": 1,
-        })
-
-    return tax_rows
