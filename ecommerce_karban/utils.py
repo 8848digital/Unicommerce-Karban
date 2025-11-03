@@ -34,8 +34,8 @@ def sync_customer(order):
 	"""Using order create a new customer.
 
 	Note: Unicommerce doesn't deduplicate customer."""
-	customer = _create_new_customer(order)
-	_create_customer_addresses(order.get("addresses") or [], customer, order.get("customerGSTIN"))
+	customer, status = _create_new_customer(order)
+	_create_customer_addresses(order.get("addresses") or [], customer, order.get("customerGSTIN"), status)
 	return customer
 
 def _check_if_customer_exists(address, customer_code):
@@ -71,7 +71,7 @@ def _create_new_customer(order):
 			frappe.db.set_value("Customer", customer.name, "gstin", "")
 			frappe.db.set_value("Customer", customer.name, "gst_category", "Unregistered")
 		frappe.db.set_value("Customer", customer.name, "default_currency", order.get("currencyCode"))
-		return customer
+		return customer, 'Existing'
 
 	setting = frappe.get_cached_doc(SETTINGS_DOCTYPE)
 	customer_group = (
@@ -100,10 +100,10 @@ def _create_new_customer(order):
 	customer.flags.ignore_mandatory = True
 	customer.insert(ignore_permissions=True)
 
-	return customer
+	return customer, 'New'
 
 
-def _create_customer_addresses(addresses: list[dict[str, Any]], customer, gstin) -> None:
+def _create_customer_addresses(addresses: list[dict[str, Any]], customer, gstin, status) -> None:
 	"""Create address from dictionary containing fields used in Address doctype of ERPNext.
 
 	Unicommerce orders contain address list,
@@ -111,13 +111,13 @@ def _create_customer_addresses(addresses: list[dict[str, Any]], customer, gstin)
 	else first is billing and second is shipping"""
 
 	if len(addresses) == 1:
-		_create_customer_address(addresses[0], "Billing", customer, gstin, also_shipping=True)
+		_create_customer_address(addresses[0], "Billing", customer, gstin,status, also_shipping=True)
 	elif len(addresses) >= 2:
-		_create_customer_address(addresses[0], "Billing", customer, gstin)
-		_create_customer_address(addresses[1], "Shipping", customer, gstin)
+		_create_customer_address(addresses[0], "Billing", customer, gstin, status)
+		_create_customer_address(addresses[1], "Shipping", customer, gstin, status)
 
 
-def _create_customer_address(uni_address, address_type, customer, gstin, also_shipping=False):
+def _create_customer_address(uni_address, address_type, customer, gstin, status, also_shipping=False):
 	country_code = uni_address.get("country")
 	country = UNICOMMERCE_COUNTRY_MAPPING.get(country_code)
 
@@ -131,7 +131,6 @@ def _create_customer_address(uni_address, address_type, customer, gstin, also_sh
 	state = state
 	country = country
 	pincode = uni_address.get("pincode")
-	email = uni_address.get("email")
 	phone = uni_address.get("phone")
 	address_type = address_type,
 
@@ -142,10 +141,7 @@ def _create_customer_address(uni_address, address_type, customer, gstin, also_sh
 		"city": city,
 		"state": state,
 		"country": country,
-		"pincode": pincode,
-		"email_id": email,
-		"phone": phone,
-		"gstin": gstin if gstin != "null" else "",
+		"pincode": pincode
 	}
 
 	filters = {k: (v[0] if isinstance(v, tuple) else v) for k, v in filters.items() if v}
@@ -153,14 +149,26 @@ def _create_customer_address(uni_address, address_type, customer, gstin, also_sh
 
 	existing_address_name = frappe.db.get_all("Address",filters=filters,fields=["name"],order_by="creation desc",limit=1)
 
-	if existing_address_name:
-		existing_address = frappe.get_doc("Address", existing_address_name[0].name)
+	check_contact = filters.copy()
+	check_contact.update({"phone": phone})
 
-		if not any(l.link_doctype == "Customer" and l.link_name == customer.name for l in existing_address.links):
-			existing_address.append("links", {"link_doctype": "Customer", "link_name": customer.name})
-			existing_address.save(ignore_permissions=True)
+	address_with_same_phone = frappe.db.get_all("Address",filters=check_contact,fields=["name"],limit=1)
 
-		return existing_address.name
+
+	# if existing_address_name and address_with_same_phone and status=='Existing':
+	# 	existing_address = frappe.get_doc("Address", existing_address_name[0].name)
+
+	# 	if not any(l.link_doctype == "Customer" and l.link_name == customer.name for l in existing_address.links):
+	# 		existing_address.append("links", {"link_doctype": "Customer", "link_name": customer.name})
+	# 		existing_address.save(ignore_permissions=True)
+
+	# 	return existing_address.name
+	
+	# elif existing_address_name and not address_with_same_phone:
+
+	if status=='Existing' and existing_address_name and address_with_same_phone:
+		return
+		
 
 	new_address = frappe.get_doc({
 		"doctype": "Address",
@@ -171,7 +179,7 @@ def _create_customer_address(uni_address, address_type, customer, gstin, also_sh
 		"state": state,
 		"country": country,
 		"pincode": pincode,
-		"email_id": email,
+		"email_id": uni_address.get("email"),
 		"phone": phone,
 		"is_primary_address": int(address_type == "Billing"),
 		"is_shipping_address": int(also_shipping or address_type == "Shipping"),
@@ -179,6 +187,7 @@ def _create_customer_address(uni_address, address_type, customer, gstin, also_sh
 		"gstin": gstin if gstin != "null" else "",
 		"gst_category": "Registered Regular" if gstin != "null" else "Unregistered",
 	})
+
 
 	new_address.insert(ignore_permissions=True)
 	return new_address.name
