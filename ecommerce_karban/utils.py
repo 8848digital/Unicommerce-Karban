@@ -154,19 +154,19 @@ def _create_customer_address(uni_address, address_type, customer, gstin, status,
 	address_with_same_phone = frappe.db.get_all("Address",filters=check_contact,fields=["name"],limit=1)
 
 
-	# if existing_address_name and address_with_same_phone and status=='Existing':
-	# 	existing_address = frappe.get_doc("Address", existing_address_name[0].name)
+	if existing_address_name and address_with_same_phone and status=='Existing':
+		existing_address = frappe.get_doc("Address", existing_address_name[0].name)
 
-	# 	if not any(l.link_doctype == "Customer" and l.link_name == customer.name for l in existing_address.links):
-	# 		existing_address.append("links", {"link_doctype": "Customer", "link_name": customer.name})
-	# 		existing_address.save(ignore_permissions=True)
+		if not any(l.link_doctype == "Customer" and l.link_name == customer.name for l in existing_address.links):
+			existing_address.append("links", {"link_doctype": "Customer", "link_name": customer.name})
+			existing_address.save(ignore_permissions=True)
 
-	# 	return existing_address.name
+		return existing_address.name
 	
 	# elif existing_address_name and not address_with_same_phone:
 
-	if status=='Existing' and existing_address_name and address_with_same_phone:
-		return
+	# if status=='Existing' and existing_address_name and address_with_same_phone:
+	# 	return
 		
 	new_address = frappe.get_doc({
 		"doctype": "Address",
