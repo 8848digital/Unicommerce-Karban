@@ -64,7 +64,7 @@ def _create_new_customer(order):
 
 	customer = _check_if_customer_exists(address, customer_code)
 	if customer:
-		if order.get("customerGSTIN") != "null":
+		if order.get("customerGSTIN"):
 			frappe.db.set_value("Customer", customer.name, "gstin", order.get("customerGSTIN"))
 			frappe.db.set_value("Customer", customer.name, "gst_category", "Registered Regular")
 		else:
@@ -89,8 +89,8 @@ def _create_new_customer(order):
 			"customer_group": customer_group,
 			"territory": get_root_of("Territory"),
 			"customer_type": "Individual",
-			"gstin": order.get("customerGSTIN") if order.get("customerGSTIN") != "null" else "",
-			"gst_category": "Registered Regular" if order.get("customerGSTIN") != "null" else "Unregistered",
+			"gstin": order.get("customerGSTIN") if order.get("customerGSTIN") else "",
+			"gst_category": "Registered Regular" if order.get("customerGSTIN") else "Unregistered",
 			"default_currency": order.get("currencyCode"),
 			ADDRESS_JSON_FIELD: json.dumps(address),
 			CUSTOMER_CODE_FIELD: customer_code,
@@ -132,7 +132,6 @@ def _create_customer_address(uni_address, address_type, customer, gstin, status,
 	country = country
 	pincode = uni_address.get("pincode")
 	phone = uni_address.get("phone")
-	address_type = address_type,
 
 	filters = {
 		"address_type": address_type,
@@ -169,7 +168,6 @@ def _create_customer_address(uni_address, address_type, customer, gstin, status,
 	if status=='Existing' and existing_address_name and address_with_same_phone:
 		return
 		
-
 	new_address = frappe.get_doc({
 		"doctype": "Address",
 		"address_type": address_type,
@@ -184,11 +182,9 @@ def _create_customer_address(uni_address, address_type, customer, gstin, status,
 		"is_primary_address": int(address_type == "Billing"),
 		"is_shipping_address": int(also_shipping or address_type == "Shipping"),
 		"links": [{"link_doctype": "Customer", "link_name": customer.name}],
-		"gstin": gstin if gstin != "null" else "",
-		"gst_category": "Registered Regular" if gstin != "null" else "Unregistered",
+		"gstin": gstin if gstin else "",
+		"gst_category": "Registered Regular" if gstin else "Unregistered",
 	})
-
-
 	new_address.insert(ignore_permissions=True)
 	return new_address.name
 
@@ -340,8 +336,8 @@ def _get_line_items(
 	so_items = []
 
 	for item in line_items:
-		if not is_cancelled and item.get("statusCode") == "CANCELLED":
-			continue
+		# if not is_cancelled and item.get("statusCode") == "CANCELLED":
+		# 	continue
 
 		item_code = ecommerce_item.get_erpnext_item_code(
 			integration=MODULE_NAME, integration_item_code=item["itemSku"]
