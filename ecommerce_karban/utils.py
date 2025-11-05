@@ -28,6 +28,7 @@ from ecommerce_integrations.unicommerce.order import _create_sales_invoices, _sy
 from ecommerce_integrations.unicommerce.utils import create_unicommerce_log, get_unicommerce_date
 from ecommerce_integrations.utils.taxation import get_dummy_tax_category
 from collections.abc import Iterator
+from frappe.utils import add_to_date, flt
 
 UnicommerceOrder = NewType("UnicommerceOrder", dict[str, Any])
 def sync_customer(order):
@@ -241,7 +242,7 @@ def _get_new_orders(client: UnicommerceAPIClient, status: str | None) -> Iterato
 	val_from_date = frappe.db.get_single_value("Unicommerce Settings", "custom_from_date")
 	val_to_date = frappe.db.get_single_value("Unicommerce Settings", "custom_to_date")
 	
-	uni_orders = client.search_sales_order(from_date=val_from_date, to_date=val_to_date, status=status)
+	uni_orders = client.search_sales_order(from_date=str(val_from_date), to_date=str(val_to_date), status=status)
 
 	configured_channels = {
 		c.channel_id
@@ -326,19 +327,11 @@ def _create_order(order: UnicommerceOrder, customer) -> None:
 	)
 
 	so.flags.raw_data = order
-	so.save()
-	# so.submit()
+	taxes = get_taxes_so(order["saleOrderItems"], channel_config)
 
-	facility_code = so.get(FACILITY_CODE_FIELD)
-	shipping_packages = order["shippingPackages"]
-	client = UnicommerceAPIClient()
-	for package in shipping_packages:
-		invoice_data = client.get_sales_invoice(
-				shipping_package_code=package["code"], facility_code=facility_code
-			)
-		invoice_tax = invoice_data["invoice"]
-		uni_line_items = invoice_tax["invoiceItems"]
-		so.set("taxes", get_taxes(uni_line_items, channel_config))
+	for tax in taxes:
+		so.append("taxes", tax)
+	so.save()
 
 	so.submit()
 	if is_cancelled:
@@ -371,7 +364,8 @@ def _get_line_items(
 		so_items.append(
 			{
 				"item_code": item_code,
-				"rate": item["sellingPriceWithoutTaxesAndDiscount"],
+				"distributed_discount_amount": item.get("discount"),
+				"rate": item["sellingPriceWithoutTaxesAndDiscount"] - item.get("discount", 0),
 				"qty": 1,
 				"stock_uom": "Nos",
 				"warehouse": warehouse,
@@ -381,3 +375,68 @@ def _get_line_items(
 		)
 	return so_items
 
+from ecommerce_integrations.unicommerce.constants import (
+	CHANNEL_ID_FIELD,
+	CHANNEL_TAX_ACCOUNT_FIELD_MAP,
+	FACILITY_CODE_FIELD,
+	INVOICE_CODE_FIELD,
+	IS_COD_CHECKBOX,
+	MODULE_NAME,
+	ORDER_CODE_FIELD,
+	ORDER_ITEM_BATCH_NO,
+	ORDER_ITEM_CODE_FIELD,
+	ORDER_STATUS_FIELD,
+	PACKAGE_TYPE_FIELD,
+	SETTINGS_DOCTYPE,
+	TAX_FIELDS_MAPPING,
+	TAX_RATE_FIELDS_MAPPING,
+)
+def get_taxes_so(line_items, channel_config) -> list:
+	taxes = []
+	TAX_FIELDS_MAPPINGs = {
+		"igst": "totalIntegratedGst",
+		"cgst": "totalCentralGst",
+		"sgst": "totalStateGst",
+		"ugst": "totalUnionTerritoryGst"
+	}
+
+
+	tax_map = {tax_head: 0.0 for tax_head in TAX_FIELDS_MAPPING.keys()}
+	item_wise_tax_map = {tax_head: {} for tax_head in TAX_FIELDS_MAPPING.keys()}
+
+	tax_account_map = {
+		tax_head: channel_config.get(account_field)
+		for tax_head, account_field in CHANNEL_TAX_ACCOUNT_FIELD_MAP.items()
+	}
+
+
+	for item in line_items:
+		item_code = ecommerce_item.get_erpnext_item_code(
+			integration=MODULE_NAME, integration_item_code=item["itemSku"]
+		)
+		for tax_head, unicommerce_field in TAX_FIELDS_MAPPINGs.items():
+			tax_amount = 0.0
+			tax_rate_field = TAX_RATE_FIELDS_MAPPING.get(tax_head, "")
+			tax_rate = item.get(tax_rate_field, 0.0)
+			tax_amount = flt(item.get(unicommerce_field)) or 0.0
+			tax_map[tax_head] += tax_amount
+
+			item_wise_tax_map[tax_head][item_code] = [tax_rate, tax_amount]
+
+	taxes = []
+
+	for tax_head, value in tax_map.items():
+		if not value:
+			continue
+		taxes.append(
+			{
+				"charge_type": "Actual",
+				"account_head": tax_account_map[tax_head],
+				"tax_amount": value,
+				"description": tax_head.replace("_", " ").upper(),
+				"item_wise_tax_detail": json.dumps(item_wise_tax_map[tax_head]),
+				"dont_recompute_tax": 1,
+			}
+		)
+
+	return taxes
