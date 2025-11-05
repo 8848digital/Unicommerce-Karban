@@ -24,10 +24,10 @@ from ecommerce_integrations.unicommerce.constants import (
 	ORDER_CODE_FIELD,
 	SETTINGS_DOCTYPE,
 )
-from ecommerce_integrations.unicommerce.order import _get_new_orders, _create_sales_invoices, _sync_order_items,_get_line_items,_get_facility_code,get_taxes,_get_batch_no
+from ecommerce_integrations.unicommerce.order import _create_sales_invoices, _sync_order_items,_get_line_items,_get_facility_code,get_taxes,_get_batch_no
 from ecommerce_integrations.unicommerce.utils import create_unicommerce_log, get_unicommerce_date
 from ecommerce_integrations.utils.taxation import get_dummy_tax_category
-
+from collections.abc import Iterator
 
 UnicommerceOrder = NewType("UnicommerceOrder", dict[str, Any])
 def sync_customer(order):
@@ -233,6 +233,31 @@ def sync_new_orders(client: UnicommerceAPIClient = None, force=False):
 		if settings.only_sync_completed_orders:
 			_create_sales_invoices(order, sales_order, client)
 
+
+def _get_new_orders(client: UnicommerceAPIClient, status: str | None) -> Iterator[UnicommerceOrder] | None:
+	"""Search new sales order from unicommerce."""
+
+	updated_since = 24 * 60  # minutes
+	val_from_date = frappe.db.get_single_value("Unicommerce Settings", "custom_from_date")
+	val_to_date = frappe.db.get_single_value("Unicommerce Settings", "custom_to_date")
+	
+	uni_orders = client.search_sales_order(from_date=val_from_date, to_date=val_to_date, status=status)
+
+	configured_channels = {
+		c.channel_id
+		for c in frappe.get_all("Unicommerce Channel", filters={"enabled": 1}, fields="channel_id")
+	}
+	if uni_orders is None:
+		return
+
+	for order in uni_orders:
+		if order["channel"] not in configured_channels:
+			continue
+
+		# In case a sales invoice is not generated for some reason and is skipped, we need to create it manually. Therefore, I have commented out this line of code.
+		order = client.get_sales_order(order_code=order["code"])
+		if order:
+			yield order
 
 def create_order(payload: UnicommerceOrder, request_id: str | None = None, client=None) -> None:
 	order = payload
