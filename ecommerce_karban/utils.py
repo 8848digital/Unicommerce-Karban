@@ -29,6 +29,24 @@ from ecommerce_integrations.unicommerce.utils import create_unicommerce_log, get
 from ecommerce_integrations.utils.taxation import get_dummy_tax_category
 from collections.abc import Iterator
 from frappe.utils import add_to_date, flt
+from ecommerce_integrations.ecommerce_integrations.doctype.ecommerce_item import ecommerce_item
+from ecommerce_integrations.unicommerce.constants import (
+	CHANNEL_ID_FIELD,
+	CHANNEL_TAX_ACCOUNT_FIELD_MAP,
+	FACILITY_CODE_FIELD,
+	INVOICE_CODE_FIELD,
+	IS_COD_CHECKBOX,
+	MODULE_NAME,
+	ORDER_CODE_FIELD,
+	ORDER_ITEM_BATCH_NO,
+	ORDER_ITEM_CODE_FIELD,
+	ORDER_STATUS_FIELD,
+	PACKAGE_TYPE_FIELD,
+	SETTINGS_DOCTYPE,
+	TAX_FIELDS_MAPPING,
+	TAX_RATE_FIELDS_MAPPING,
+)
+
 
 UnicommerceOrder = NewType("UnicommerceOrder", dict[str, Any])
 def sync_customer(order):
@@ -339,12 +357,6 @@ def _create_order(order: UnicommerceOrder, customer) -> None:
 
 	return so
 
-from ecommerce_integrations.ecommerce_integrations.doctype.ecommerce_item import ecommerce_item
-from ecommerce_integrations.unicommerce.constants import (
-	MODULE_NAME,
-	ORDER_ITEM_BATCH_NO,
-	ORDER_ITEM_CODE_FIELD
-)
 
 def _get_line_items(
 	line_items, default_warehouse: str | None = None, is_cancelled: bool = False
@@ -375,22 +387,6 @@ def _get_line_items(
 		)
 	return so_items
 
-from ecommerce_integrations.unicommerce.constants import (
-	CHANNEL_ID_FIELD,
-	CHANNEL_TAX_ACCOUNT_FIELD_MAP,
-	FACILITY_CODE_FIELD,
-	INVOICE_CODE_FIELD,
-	IS_COD_CHECKBOX,
-	MODULE_NAME,
-	ORDER_CODE_FIELD,
-	ORDER_ITEM_BATCH_NO,
-	ORDER_ITEM_CODE_FIELD,
-	ORDER_STATUS_FIELD,
-	PACKAGE_TYPE_FIELD,
-	SETTINGS_DOCTYPE,
-	TAX_FIELDS_MAPPING,
-	TAX_RATE_FIELDS_MAPPING,
-)
 def get_taxes_so(line_items, channel_config) -> list:
 	taxes = []
 	TAX_FIELDS_MAPPINGs = {
@@ -421,7 +417,11 @@ def get_taxes_so(line_items, channel_config) -> list:
 			tax_amount = flt(item.get(unicommerce_field)) or 0.0
 			tax_map[tax_head] += tax_amount
 
-			item_wise_tax_map[tax_head][item_code] = [tax_rate, tax_amount]
+			existing = item_wise_tax_map[tax_head].get(item_code, [tax_rate, 0.0])
+			item_wise_tax_map[tax_head][item_code] = [
+				tax_rate,
+				flt(existing[1]) + tax_amount
+			]
 
 	taxes = []
 
