@@ -147,23 +147,29 @@ app_license = "mit"
 # Scheduled Tasks
 # ---------------
 
-# scheduler_events = {
-# 	"all": [
-# 		"ecommerce_karban.tasks.all"
-# 	],
-# 	"daily": [
-# 		"ecommerce_karban.tasks.daily"
-# 	],
-# 	"hourly": [
-# 		"ecommerce_karban.tasks.hourly"
-# 	],
-# 	"weekly": [
-# 		"ecommerce_karban.tasks.weekly"
-# 	],
-# 	"monthly": [
-# 		"ecommerce_karban.tasks.monthly"
-# 	],
-# }
+scheduler_events = {
+	# "all": [
+	# 	"ecommerce_karban.tasks.all"
+	# ],
+	# "daily": [
+	# 	"ecommerce_karban.tasks.daily"
+	# ],
+	# "hourly": [
+	# 	"ecommerce_karban.tasks.hourly"
+	# ],
+	# "weekly": [
+	# 	"ecommerce_karban.tasks.weekly"
+	# ],
+	# "monthly": [
+	# 	"ecommerce_karban.tasks.monthly"
+	# ],
+    "cron": {
+		# Every five minutes
+		"*/5 * * * *": [
+			"ecommerce_karban.utils.sync_new_orders"
+		],
+	},
+}
 
 # Testing
 # -------
