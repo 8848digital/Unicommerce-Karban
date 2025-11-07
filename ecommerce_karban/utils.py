@@ -247,10 +247,19 @@ def sync_new_orders(client: UnicommerceAPIClient = None, force=False):
 		return
 
 	for order in new_orders:
-		sales_order = create_order(order, client=client)
+		try:
+			sales_order = create_order(order, client=client)
 
-		if settings.only_sync_completed_orders:
-			_create_sales_invoices(order, sales_order, client)
+			if settings.only_sync_completed_orders:
+				_create_sales_invoices(order, sales_order, client)
+		except Exception as e:
+			create_unicommerce_log(
+				method="ecommerce_integrations.unicommerce.order.sync_new_orders",
+				request_data=order,
+				status="Error",
+				exception=e,
+			)
+			continue
 
 
 def _get_new_orders(client: UnicommerceAPIClient, status: str | None) -> Iterator[UnicommerceOrder] | None:
